@@ -105,38 +105,84 @@ def map_setu_transaction_to_bank_transaction(raw_txn, user, consent_request=None
 
 def parse_setu_fi_data_response(fi_payload, user, consent_request=None):
     """
-    Parses FIDataFetchResponseV2 JSON structure (DepositJSON -> accounts[] -> transactions[]).
+    Parses FIDataFetchResponseV2 JSON structure.
+    Handles:
+    - Setu v2 GET /v2/sessions/{id} structure: fips[] -> accounts[] -> data -> account -> transactions -> transaction[]
+    - Setu webhook / legacy structure: payload[] or DepositJSON -> account[] -> transactions[]
     Returns list of mapped BankTransaction dicts ready for IngestionEngine.
     """
     if not fi_payload or not isinstance(fi_payload, dict):
         logger.warning(f"Received empty or non-dict FI payload: {type(fi_payload)}")
         return []
 
-    # Log payload shape for dev diagnostics (JSON vs XML/ETFJSON)
-    payload_keys = list(fi_payload.keys())
-    logger.info(f"Setu FI response root keys: {payload_keys}")
+    logger.info(f"Setu FI response root keys: {list(fi_payload.keys())}")
 
-    accounts = (
-        fi_payload.get('payload', []) or
-        fi_payload.get('accounts', []) or
-        fi_payload.get('DepositJSON', {}).get('account', []) or
-        []
-    )
-    if isinstance(accounts, dict):
-        accounts = [accounts]
+    raw_txns = []
 
-    mapped_transactions = []
-    for acc in accounts:
-        txns = (
-            acc.get('transactions', []) or
-            acc.get('Transactions', {}).get('Transaction', []) or
+    # 1. Standard Setu v2 GET /v2/sessions/{session_id} response: fips[]
+    fips = fi_payload.get('fips', [])
+    if isinstance(fips, list):
+        for fip in fips:
+            accounts = fip.get('accounts', []) if isinstance(fip, dict) else []
+            for acc in accounts:
+                if not isinstance(acc, dict):
+                    continue
+                # Extract transactions from acc.data.account.transactions
+                data_obj = acc.get('data', {})
+                acct_obj = (
+                    data_obj.get('account', {}) or
+                    data_obj.get('DepositJSON', {}).get('account', {}) or
+                    data_obj.get('decryptedData', {}).get('account', {}) or
+                    data_obj
+                )
+                txns_container = (
+                    acct_obj.get('transactions', {}) or
+                    acct_obj.get('Transactions', {}) or
+                    acc.get('transactions', {})
+                )
+                if isinstance(txns_container, dict):
+                    t_list = txns_container.get('transaction', []) or txns_container.get('Transaction', [])
+                elif isinstance(txns_container, list):
+                    t_list = txns_container
+                else:
+                    t_list = []
+                raw_txns.extend(t_list)
+
+    # 2. Webhook / direct payload fallbacks
+    if not raw_txns:
+        accounts = (
+            fi_payload.get('payload', []) or
+            fi_payload.get('accounts', []) or
+            fi_payload.get('financialData', []) or
+            fi_payload.get('DepositJSON', {}).get('account', []) or
             []
         )
-        if isinstance(txns, dict):
-            txns = [txns]
+        if isinstance(accounts, dict):
+            accounts = [accounts]
 
-        for raw_tx in txns:
+        for acc in accounts:
+            if not isinstance(acc, dict):
+                continue
+            txns_container = (
+                acc.get('transactions', {}) or
+                acc.get('Transactions', {}) or
+                acc.get('data', {}).get('account', {}).get('transactions', {})
+            )
+            if isinstance(txns_container, dict):
+                t_list = txns_container.get('transaction', []) or txns_container.get('Transaction', [])
+            elif isinstance(txns_container, list):
+                t_list = txns_container
+            else:
+                t_list = []
+            raw_txns.extend(t_list)
+
+    logger.info(f"Extracted {len(raw_txns)} raw transaction items from Setu FI payload.")
+
+    mapped_transactions = []
+    for raw_tx in raw_txns:
+        if isinstance(raw_tx, dict):
             mapped_tx = map_setu_transaction_to_bank_transaction(raw_tx, user, consent_request)
             mapped_transactions.append(mapped_tx)
 
     return mapped_transactions
+

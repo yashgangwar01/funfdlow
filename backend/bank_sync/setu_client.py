@@ -209,19 +209,31 @@ class SetuAAClient:
     def trigger_session(self, consent_id, start=None, end=None):
         """
         POST /v2/sessions — Step 1 of FI data fetch.
+        Requires dataRange with full ISO 8601 datetime strings.
         """
+        from django.utils import timezone
+        now = timezone.now().date()
+        range_start = start or (now - timedelta(days=90))
+        range_end = end or now
+
         url = f"{self.base_url}/v2/sessions"
         payload = {
             "consentId": consent_id,
-            "format": "json"
+            "format": "json",
+            # Confirmed required by Setu sandbox — must be full ISO 8601 datetimes
+            "dataRange": {
+                "from": range_start.strftime('%Y-%m-%dT00:00:00.000Z'),
+                "to": range_end.strftime('%Y-%m-%dT23:59:59.999Z')
+            }
         }
-
+        logger.debug("Setu POST /v2/sessions payload: %s", payload)
         res = self._request_with_retry('POST', url, json=payload)
         data = res.json()
         session_id = data.get('id') or data.get('sessionId')
         if not session_id:
             raise SetuAPIError(f"Setu session creation response missing session ID: {data}", response_body=data)
         return {'session_id': session_id, 'raw': data}
+
 
     def poll_session(self, session_id):
         """

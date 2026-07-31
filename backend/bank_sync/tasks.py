@@ -26,7 +26,11 @@ def process_setu_payload(user_id, consent_id=None, session_id=None):
         consent_handle = consent.consent_handle if consent else None
 
         if not session_id and consent_handle:
-            sess_res = client.trigger_session(consent_handle)
+            sess_res = client.trigger_session(
+                consent_handle,
+                start=consent.fi_data_range_start if consent else None,
+                end=consent.fi_data_range_end if consent else None,
+            )
             session_id = sess_res.get('session_id')
 
         if not session_id:

@@ -97,8 +97,9 @@ class ConsentView(APIView):
         serializer = InitiateConsentSerializer(data=request.data)
         if serializer.is_valid():
             vua = serializer.validated_data['vua']
-            start = serializer.validated_data.get('fi_data_range_start')
-            end = serializer.validated_data.get('fi_data_range_end')
+            now = timezone.now().date()
+            start = serializer.validated_data.get('fi_data_range_start') or (now - timezone.timedelta(days=90))
+            end = serializer.validated_data.get('fi_data_range_end') or now
 
             client = SetuAAClient()
             setu_res = client.create_consent_request(request.user, vua=vua, date_range_start=start, date_range_end=end)

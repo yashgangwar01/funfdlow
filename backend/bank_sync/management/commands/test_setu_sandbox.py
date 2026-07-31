@@ -12,8 +12,8 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             '--vua',
-            default='9999999999@onemoney',
-            help='Virtual User Address for the sandbox test, e.g. 9999999999@onemoney (default: 9999999999@onemoney)'
+            default='7668752882@onemoney',
+            help='Virtual User Address for the sandbox test, e.g. 7668752882@onemoney (default: 9999999999@onemoney)'
         )
 
     def handle(self, *args, **options):
