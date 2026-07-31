@@ -26,13 +26,6 @@ export const BankSync = () => {
   // Optionally fetch provider list from backend (falls back to static list)
   const [providers, setProviders] = useState(AA_PROVIDERS);
 
-  useEffect(() => {
-    fetchConsents();
-    api.get('/bank-sync/aa-providers/')
-      .then(res => { if (res.data?.length) setProviders(res.data); })
-      .catch(() => {}); // silently use static fallback
-  }, []);
-
   const fetchConsents = async () => {
     try {
       const res = await api.get('/bank-sync/consents/');
@@ -43,6 +36,30 @@ export const BankSync = () => {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    fetchConsents();
+    api.get('/bank-sync/aa-providers/')
+      .then(res => { if (res.data?.length) setProviders(res.data); })
+      .catch(() => {});
+
+    // Refresh when user returns to tab after completing Setu consent screen
+    const onFocus = () => fetchConsents();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
+
+  // Auto-poll consent status every 6 seconds if any consent is PENDING
+  useEffect(() => {
+    const hasPending = consents.some(c => c.status === 'PENDING');
+    if (!hasPending) return;
+
+    const timer = setInterval(() => {
+      fetchConsents();
+    }, 6000);
+
+    return () => clearInterval(timer);
+  }, [consents]);
 
   const validatePhone = (val) => {
     if (!/^\d{10}$/.test(val)) return 'Enter a valid 10-digit mobile number.';

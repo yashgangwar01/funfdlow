@@ -125,10 +125,39 @@ class ConsentView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+def check_and_update_consent_status(consent):
+    """
+    Checks Setu API directly for consent status if DB record is PENDING.
+    If approved on Setu, updates DB to APPROVED and triggers automatic data fetch.
+    """
+    if consent.status == 'PENDING':
+        try:
+            client = SetuAAClient()
+            setu_data = client.get_consent(consent.consent_handle)
+            setu_status = setu_data.get('status') or (setu_data.get('detail') or {}).get('status') or ''
+            if setu_status.upper() in ('ACTIVE', 'APPROVED', 'CONSENT_APPROVED'):
+                consent.status = 'APPROVED'
+                consent.save()
+                try:
+                    process_setu_payload.delay(user_id=consent.user.id, consent_id=consent.id)
+                except Exception:
+                    process_setu_payload(user_id=consent.user.id, consent_id=consent.id)
+            elif setu_status.upper() in ('REJECTED', 'REVOKED', 'EXPIRED'):
+                consent.status = 'REJECTED'
+                consent.save()
+        except Exception as e:
+            logger.warning(f"Failed auto-check of Setu consent status for {consent.consent_handle}: {e}")
+
+
 class ConsentListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        consents = ConsentRequest.objects.filter(user=request.user)
+        for consent in consents.filter(status='PENDING'):
+            check_and_update_consent_status(consent)
+
+        # Re-query updated consents
         consents = ConsentRequest.objects.filter(user=request.user)
         return Response(ConsentRequestSerializer(consents, many=True).data)
 
@@ -137,6 +166,10 @@ class ManualSyncView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        # Auto-check status of pending consents first
+        for pending_consent in ConsentRequest.objects.filter(user=request.user, status='PENDING'):
+            check_and_update_consent_status(pending_consent)
+
         active_consent = ConsentRequest.objects.filter(user=request.user, status='APPROVED').first()
         if not active_consent:
             active_consent = ConsentRequest.objects.filter(user=request.user).first()
