@@ -127,33 +127,28 @@ class SetuAAClient:
         res = self._request_with_retry('GET', url, params=params)
         return res.json()
 
-    def create_consent_request(self, user, date_range_start=None, date_range_end=None):
+    def create_consent_request(self, user, vua, date_range_start=None, date_range_end=None):
         """
         POST /v2/consents — creates a consent request.
+        `vua` (Virtual User Address) must be provided by the caller in the format
+        "{phone_number}@{aa_handle}" e.g. "9999999999@onemoney".
         Raises SetuAPIError immediately on failure. NO mock/fake handles are returned.
         """
+        if not vua or '@' not in vua:
+            raise SetuAPIError(f"Invalid or missing vua '{vua}'. Expected format: phone@aa_handle")
+
         now = timezone.now().date()
         start = date_range_start or (now - timedelta(days=90))
         end = date_range_end or now
 
-        # TODO: In a real user flow, `vua` (Virtual User Address / AA handle) must be
-        # collected from the user during the "Link Bank Account" step. The user needs to
-        # enter their AA app handle (e.g. "9999999999@onemoney" or "9999999999@anumati").
-        # These are the ONLY two confirmed AA entity handles in Setu's sandbox environment,
-        # verified via GET /v2/fips aaWiseSuccessRate data on 2026-07-31.
-        # A future frontend update must add a VUA input field before triggering consent.
-        vua = getattr(user, 'aa_handle', None) or "9999999999@onemoney"
-
         payload = {
-            # Fix [1]: Added required "vua" field (AA Virtual User Address / handle)
             "vua": vua,
             "consentDuration": {"unit": "MONTH", "value": 6},
             "consentMode": "STORE",
             "consentTypes": ["TRANSACTIONS", "PROFILE", "SUMMARY"],
             "dataLife": {"unit": "MONTH", "value": 12},
             "fetchType": "PERIODIC",
-            # Fix [2] + [4]: Renamed "fiDataRange" → "dataRange" (Setu's actual field name)
-            # Fix [1] + [2]: Setu requires full ISO 8601 datetime strings with milliseconds + UTC 'Z'
+            # Setu v2 uses "dataRange" with full ISO 8601 datetime strings
             "dataRange": {
                 "from": start.strftime('%Y-%m-%dT00:00:00.000Z'),
                 "to": end.strftime('%Y-%m-%dT23:59:59.999Z')
@@ -162,16 +157,16 @@ class SetuAAClient:
             "frequency": {"unit": "MONTH", "value": 1},
             "purpose": {
                 "code": "101",
-                # Fix [3]: Corrected refUri — must use /aa/purpose/ not /FISchema/purpose/
                 "refUri": "https://api.rebit.org.in/aa/purpose/101.xml",
                 "text": "Personal finance management and automated budget allocation",
-                # Fix [3] + [4]: Renamed "Category" → "category" (lowercase, as Setu requires)
                 "category": {"type": "Personal Finance"}
             },
             "redirectUrl": "http://127.0.0.1:5173/bank-sync"
         }
 
         url = f"{self.base_url}/v2/consents"
+        # Log at DEBUG only — never prints at INFO level or above in production
+        logger.debug("Setu POST /v2/consents payload: %s", payload)
         res = self._request_with_retry('POST', url, json=payload)
         data = res.json()
 

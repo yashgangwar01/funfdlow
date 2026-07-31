@@ -8,6 +8,7 @@ from .serializers import ConsentRequestSerializer, InitiateConsentSerializer
 from .setu_client import SetuAAClient
 from .tasks import process_setu_payload
 from .mappers import parse_setu_fi_data_response
+from .aa_providers import AA_PROVIDERS
 from transactions.services import IngestionEngine
 
 
@@ -82,17 +83,25 @@ class FIPListView(APIView):
         return Response(fips_data)
 
 
+class AAProvidersView(APIView):
+    """Returns the list of supported AA providers for the frontend dropdown."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        return Response(AA_PROVIDERS)
+
 class ConsentView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
         serializer = InitiateConsentSerializer(data=request.data)
         if serializer.is_valid():
+            vua = serializer.validated_data['vua']
             start = serializer.validated_data.get('fi_data_range_start')
             end = serializer.validated_data.get('fi_data_range_end')
 
             client = SetuAAClient()
-            setu_res = client.create_consent_request(request.user, start, end)
+            setu_res = client.create_consent_request(request.user, vua=vua, date_range_start=start, date_range_end=end)
 
             consent_handle = setu_res['consent_handle']
             redirect_url = setu_res['redirect_url']
