@@ -16,6 +16,7 @@ class ConsentRequest(models.Model):
     fi_data_range_start = models.DateField(null=True, blank=True)
     fi_data_range_end = models.DateField(null=True, blank=True)
     redirect_url = models.TextField(blank=True, help_text="Setu consent webview/screen redirect URL")
+    last_synced_at = models.DateTimeField(null=True, blank=True, help_text="Timestamp when FI data was last fetched & ingested")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -66,7 +66,7 @@ class SetuAAGatewayV2IntegrationTests(TestCase):
         }
         mock_req.return_value = mock_res
 
-        res = self.client.post('/api/v1/bank-sync/consent/', {})
+        res = self.client.post('/api/v1/bank-sync/consent/', {'vua': '9999999999@onemoney'})
         self.assertEqual(res.status_code, status.HTTP_201_CREATED)
         self.assertIn('redirect_url', res.data)
 

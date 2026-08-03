@@ -1,4 +1,5 @@
 import json
+import logging
 from rest_framework import permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -10,6 +11,8 @@ from .tasks import process_setu_payload
 from .mappers import parse_setu_fi_data_response
 from .aa_providers import AA_PROVIDERS
 from transactions.services import IngestionEngine
+
+logger = logging.getLogger(__name__)
 
 
 class WebhookView(APIView):
@@ -48,22 +51,25 @@ class WebhookView(APIView):
         if consent_handle:
             consent = ConsentRequest.objects.filter(consent_handle=consent_handle).first()
 
+        # Handle direct FI data payload inline if present
+        fi_data = payload.get('financialData') or payload.get('DepositJSON') or payload.get('accounts')
+
         if consent:
             new_status = payload.get('status') or payload.get('consentStatus')
             if new_status in ('APPROVED', 'ACTIVE', 'CONSENT_APPROVED'):
                 consent.status = 'APPROVED'
-                consent.save()
-                try:
-                    process_setu_payload.delay(user_id=consent.user.id, consent_id=consent.id)
-                except Exception:
-                    process_setu_payload(user_id=consent.user.id, consent_id=consent.id)
+                consent.save(update_fields=['status', 'updated_at'])
+                # Only trigger separate session poll if fi_data was not included in webhook
+                if not fi_data:
+                    try:
+                        process_setu_payload(user_id=consent.user.id, consent_id=consent.id)
+                    except Exception as e:
+                        logger.warning(f"Setu session fetch from webhook skipped/failed for {consent.consent_handle}: {e}")
 
             elif new_status in ('REJECTED', 'EXPIRED', 'REVOKED'):
                 consent.status = new_status if new_status in ('REJECTED', 'EXPIRED') else 'REJECTED'
-                consent.save()
+                consent.save(update_fields=['status', 'updated_at'])
 
-        # Handle direct FI data payload inline if present
-        fi_data = payload.get('financialData') or payload.get('DepositJSON') or payload.get('accounts')
         if fi_data and consent:
             mapped_txs = parse_setu_fi_data_response({'payload': fi_data}, consent.user, consent)
             for mapped_tx in mapped_txs:
@@ -127,34 +133,58 @@ class ConsentView(APIView):
 
 def check_and_update_consent_status(consent):
     """
-    Checks Setu API directly for consent status if DB record is PENDING.
-    If approved on Setu, updates DB to APPROVED and triggers automatic data fetch.
+    Checks Setu API for consent status if PENDING, or triggers data fetch if APPROVED but unsynced.
     """
     if consent.status == 'PENDING':
+        logger.info(f"🔍 [AUTO-SYNC POLL] Checking consent status for consent_id={consent.id} (handle={consent.consent_handle}) user={consent.user.email}")
         try:
             client = SetuAAClient()
             setu_data = client.get_consent(consent.consent_handle)
             setu_status = setu_data.get('status') or (setu_data.get('detail') or {}).get('status') or ''
+            logger.info(f"📊 [AUTO-SYNC POLL] Setu status for {consent.consent_handle} is '{setu_status}'")
+
             if setu_status.upper() in ('ACTIVE', 'APPROVED', 'CONSENT_APPROVED'):
+                logger.info(f"✨ [AUTO-SYNC POLL] Consent {consent.consent_handle} is APPROVED on Setu! Updating DB status and fetching data...")
                 consent.status = 'APPROVED'
-                consent.save()
+                consent.save(update_fields=['status', 'updated_at'])
                 try:
-                    process_setu_payload.delay(user_id=consent.user.id, consent_id=consent.id)
-                except Exception:
-                    process_setu_payload(user_id=consent.user.id, consent_id=consent.id)
+                    count = process_setu_payload(user_id=consent.user.id, consent_id=consent.id)
+                    logger.info(f"🎉 [AUTO-SYNC POLL] Successfully fetched and ingested {count} BankTransaction records for user {consent.user.email} (consent={consent.consent_handle})")
+                except Exception as e:
+                    logger.error(f"❌ [AUTO-SYNC POLL] Error during automatic data sync of approved consent {consent.consent_handle}: {e}")
+                    consent.last_synced_at = timezone.now()
+                    consent.save(update_fields=['last_synced_at', 'updated_at'])
             elif setu_status.upper() in ('REJECTED', 'REVOKED', 'EXPIRED'):
-                consent.status = 'REJECTED'
-                consent.save()
+                logger.info(f"🛑 [AUTO-SYNC POLL] Consent {consent.consent_handle} was {setu_status}. Updating DB status...")
+                consent.status = 'REJECTED' if setu_status.upper() != 'EXPIRED' else 'EXPIRED'
+                consent.save(update_fields=['status', 'updated_at'])
+            else:
+                logger.info(f"⏳ [AUTO-SYNC POLL] Consent {consent.consent_handle} remains in '{setu_status}' state on Setu. Waiting for user approval on webview...")
         except Exception as e:
-            logger.warning(f"Failed auto-check of Setu consent status for {consent.consent_handle}: {e}")
+            logger.warning(f"⚠️ [AUTO-SYNC POLL] Failed auto-check of Setu consent status for {consent.consent_handle}: {e}")
+
+    elif consent.status == 'APPROVED' and consent.last_synced_at is None:
+        logger.info(f"⚡ [AUTO-SYNC POLL] Found APPROVED-but-UNSYNCED consent_id={consent.id} (handle={consent.consent_handle}) for user={consent.user.email}. Triggering automatic fetch pipeline...")
+        try:
+            count = process_setu_payload(user_id=consent.user.id, consent_id=consent.id)
+            logger.info(f"🎉 [AUTO-SYNC POLL] Successfully fetched and ingested {count} BankTransaction records for user {consent.user.email} (consent={consent.consent_handle})")
+        except Exception as e:
+            logger.error(f"❌ [AUTO-SYNC POLL] Error during automatic sync of unsynced consent {consent.consent_handle}: {e}")
+            consent.last_synced_at = timezone.now()
+            consent.save(update_fields=['last_synced_at', 'updated_at'])
 
 
 class ConsentListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        consents = ConsentRequest.objects.filter(user=request.user)
-        for consent in consents.filter(status='PENDING'):
+        user_consents = ConsentRequest.objects.filter(user=request.user)
+        # Check consents that are PENDING or APPROVED-but-UNSYNCED
+        from django.db.models import Q
+        pending_or_unsynced = user_consents.filter(
+            Q(status='PENDING') | Q(status='APPROVED', last_synced_at__isnull=True)
+        )
+        for consent in pending_or_unsynced:
             check_and_update_consent_status(consent)
 
         # Re-query updated consents
@@ -166,22 +196,25 @@ class ManualSyncView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        # Auto-check status of pending consents first
-        for pending_consent in ConsentRequest.objects.filter(user=request.user, status='PENDING'):
-            check_and_update_consent_status(pending_consent)
+        from django.db.models import Q
+        user_consents = ConsentRequest.objects.filter(user=request.user)
+        for consent in user_consents.filter(Q(status='PENDING') | Q(status='APPROVED', last_synced_at__isnull=True)):
+            check_and_update_consent_status(consent)
 
-        active_consent = ConsentRequest.objects.filter(user=request.user, status='APPROVED').first()
+        active_consent = user_consents.filter(status='APPROVED').first()
         if not active_consent:
-            active_consent = ConsentRequest.objects.filter(user=request.user).first()
+            active_consent = user_consents.first()
             if not active_consent:
                 return Response({'error': 'No bank consent found. Please link your bank account first.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        count = 0
         try:
-            process_setu_payload.delay(user_id=request.user.id, consent_id=active_consent.id)
-        except Exception:
-            process_setu_payload(user_id=request.user.id, consent_id=active_consent.id)
+            count = process_setu_payload(user_id=request.user.id, consent_id=active_consent.id)
+        except Exception as e:
+            logger.error(f"Manual sync failed for {active_consent.consent_handle}: {e}")
 
         return Response({
-            'message': 'Bank sync session triggered. Transactions will appear in your Review Inbox.',
-            'consent_handle': active_consent.consent_handle
+            'message': f'Bank sync complete. Ingested {count} transactions into your Review Inbox.',
+            'consent_handle': active_consent.consent_handle,
+            'ingested_count': count
         })

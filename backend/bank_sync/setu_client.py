@@ -223,7 +223,7 @@ class SetuAAClient:
             # Confirmed required by Setu sandbox — must be full ISO 8601 datetimes
             "dataRange": {
                 "from": range_start.strftime('%Y-%m-%dT00:00:00.000Z'),
-                "to": range_end.strftime('%Y-%m-%dT23:59:59.999Z')
+                "to": range_end.strftime('%Y-%m-%dT00:00:00.000Z')
             }
         }
         logger.debug("Setu POST /v2/sessions payload: %s", payload)

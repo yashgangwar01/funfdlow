@@ -9,32 +9,50 @@ from categories.models import Category
 from notifications.models import Notification
 
 
+GENERIC_TRANSACTION_TOKENS = {
+    'POS', 'UPI', 'ACH', 'NEFT', 'IMPS', 'REF', 'BILL', 'ATM', 'CARD',
+    'CASH', 'OTHERS', 'FT', 'DEBIT', 'CREDIT', 'DE', 'CR', 'DR', 'GENERIC_BANK_FEED', 'UNKNOWN'
+}
+
+
 class MerchantNormalizer:
     @staticmethod
     def normalize(raw_narration):
         if not raw_narration:
             return "UNKNOWN"
 
-        text = raw_narration.upper()
-        # Remove common prefixes like POS/, UPI/, ACH/, NEFT/, IMPS/, REF/
-        text = re.sub(r'^(POS/|UPI/|ACH/|NEFT/|IMPS/|REF/|BILL/|ATM/)', '', text)
-        # Remove reference numbers or trailing location codes
-        text = re.sub(r'/[0-9A-Z_/-]+$', '', text)
-        text = re.sub(r'[0-9]{5,}', '', text)
-        # Extract main merchant tokens
-        tokens = [t for t in re.split(r'[\s/,-]+', text) if t and not t.isdigit() and len(t) > 1]
+        text = raw_narration.strip()
 
-        if not tokens:
-            return "UNKNOWN"
-
-        # Known merchant keywords mapping
-        first = tokens[0]
-        keywords = ['SWIGGY', 'ZOMATO', 'NETFLIX', 'SPOTIFY', 'UBER', 'OLA', 'RAPIDO', 'AMAZON', 'FLIPKART', 'WALMART', 'LIC', 'HDFC', 'ICICI', 'EMI']
+        # 1. Check known brand keywords first
+        text_upper = text.upper()
+        keywords = [
+            'SWIGGY', 'ZOMATO', 'NETFLIX', 'SPOTIFY', 'UBER', 'OLA', 'RAPIDO',
+            'AMAZON', 'FLIPKART', 'WALMART', 'LIC', 'HDFC', 'ICICI', 'EMI', 'STARBUCKS'
+        ]
         for kw in keywords:
-            if kw in text:
+            if kw in text_upper:
                 return kw
 
-        return first
+        # 2. ReBIT multi-part format (e.g. CARD/DE/723795621359/Purab Dar/WFRO/10843854)
+        parts = [p.strip() for p in text.split('/') if p.strip()]
+
+        clean_parts = []
+        for part in parts:
+            part_upper = part.upper()
+            # Skip generic prefix mode/indicator tokens
+            if part_upper in GENERIC_TRANSACTION_TOKENS:
+                continue
+            # Skip pure numeric or long reference IDs (e.g. 723795621359)
+            if part.isdigit() or (re.match(r'^[0-9A-Z]{8,}$', part_upper) and any(c.isdigit() for c in part)):
+                continue
+            clean_parts.append(part)
+
+        if clean_parts:
+            candidate = clean_parts[0].upper()
+            if candidate not in GENERIC_TRANSACTION_TOKENS:
+                return candidate
+
+        return "GENERIC_BANK_FEED"
 
 
 class CategoryMatcherService:
@@ -195,21 +213,22 @@ class LearningLoopEngine:
             OverflowEngine.evaluate_and_trigger_smart_cover(user, new_category)
 
             # Step (c): Upsert MerchantCategoryMap for (user, normalized_merchant)
-            m_map, created = MerchantCategoryMap.objects.get_or_create(
-                user=user,
-                merchant_pattern=bank_transaction.normalized_merchant,
-                defaults={
-                    'category': new_category,
-                    'source': 'USER_CONFIRMED',
-                    'match_count': 1
-                }
-            )
-            if not created:
-                m_map.category = new_category
-                m_map.source = 'USER_CONFIRMED'
-                m_map.match_count += 1
-                m_map.last_confirmed_at = timezone.now()
-                m_map.save()
+            if bank_transaction.normalized_merchant not in GENERIC_TRANSACTION_TOKENS:
+                m_map, created = MerchantCategoryMap.objects.get_or_create(
+                    user=user,
+                    merchant_pattern=bank_transaction.normalized_merchant,
+                    defaults={
+                        'category': new_category,
+                        'source': 'USER_CONFIRMED',
+                        'match_count': 1
+                    }
+                )
+                if not created:
+                    m_map.category = new_category
+                    m_map.source = 'USER_CONFIRMED'
+                    m_map.match_count += 1
+                    m_map.last_confirmed_at = timezone.now()
+                    m_map.save()
 
             # Step (d): Set status = CONFIRMED
             bank_transaction.matched_category = new_category

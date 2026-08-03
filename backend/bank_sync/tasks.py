@@ -45,8 +45,13 @@ def process_setu_payload(user_id, consent_id=None, session_id=None):
             IngestionEngine.process_bank_transaction(user, mapped_tx)
             ingested_count += 1
 
-        logger.info(f"Ingested {ingested_count} Setu v2 transactions for user {user.email}")
+        if consent:
+            from django.utils import timezone
+            consent.last_synced_at = timezone.now()
+            consent.save(update_fields=['last_synced_at', 'updated_at'])
+
+        logger.info(f"✅ Ingested {ingested_count} Setu v2 BankTransaction records for user {user.email} (consent: {consent_handle})")
         return ingested_count
     except Exception as e:
-        logger.error(f"Error in process_setu_payload task: {e}")
+        logger.error(f"❌ Error in process_setu_payload task for consent {consent_id}: {e}")
         raise
